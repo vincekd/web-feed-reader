@@ -1,4 +1,5 @@
 //TODO: refactor the whole damn thing-- pretty much just copied from the original js
+//TODO: better rating system: figure out regexes...
 //TODO: go through newer readability file, use to enhance current script
 //TODO: get titles somehow?
 
@@ -48,17 +49,29 @@ class Readifier {
     final int SCORE_HALF_GOOD_TAGS = 3;
     final int SCORE_BAD_TAGS = 5;
     final int SCORE_HALF_BAD_TAGS = 3;
+    //regexes
+    final Pattern BREAK_SPACES = Pattern.compile("(<br\\s*\\/?>(\\s|&nbsp;?)*){1,}", Pattern.CASE_INSENSITIVE);
+    final Pattern ALLOWED_VIDEO_URLS = Pattern.compile("http:\\/\\/(www\\.)?(youtube|vimeo)\\.com", Pattern.CASE_INSENSITIVE);
+    final Pattern BREAKS_BEFORE_PARAGRAPHS = Pattern.compile("<br[^>]*>\\s*<p", Pattern.CASE_INSENSITIVE);
+    final Pattern UNLIKELY_TAGS = Pattern.compile("(combx|comment|disqus|foot|header|menu|meta|nav|rss|shoutbox|sidebar|sponsor)");
+    final Pattern LESS_LIKELY_TAGS = Pattern.compile("(and|article|body|column|main)");
+    final Pattern CONVERT_BLOCKS_TO_PS = Pattern.compile("(a|blockquote|dl|div|img|ol|p|pre|table|ul)", Pattern.CASE_INSENSITIVE);
+    final Pattern CLASS_ID_POSITIVE = Pattern.compile("(article)|(body)|(content)|(entry)|(hentry)|(page)|(pagination)|(post)|(text)");
+    final Pattern CLASS_ID_NEGATIVE = Pattern.compile("(combx)|(comment)|(contact)|(foot)|(footer)|(footnote)|(link)|(media)|(meta)|(promo)|(related)|(scroll)|(shoutbox)|(sponsor)|(tags)|(widget)");
+    final Pattern NOT_ALPHANUM = Pattern.compile("[^a-zA-Z]");
+    final Pattern PAGE_NUMS = Pattern.compile("((_|-)?[pP][a-zA-Z]*|(_|-))[0-9]{1,2}$");
 
     private static final Logger logger = Logger.getLogger(
         ReadifyFeedServlet.class.getName());
 
     public int maxPages = 20;
     public boolean preserveUnlikely = false;
+    public boolean tryTwice = false;
     private String url;
     private String baseUrl = "";
     private String bodyCache = "";
     private Document doc;
-    
+
     public Readifier(String url) {
         this.url = url;
         try {
@@ -80,42 +93,41 @@ class Readifier {
         this.prepDocument();
 
         Element article = this.grabArticle(preserveUnlikely);
-        
+
         this.prepArticle(article);
 
         if (article.html() == "" && !preserveUnlikely) {
-            article = this.grabArticle(true);
-            this.prepArticle(article);
+            if (this.tryTwice) {
+                article = this.grabArticle(true);
+                this.prepArticle(article);
+            }
             if (article.html() == "") {
                 //failed
                 return this.bodyCache;
             }
         }
-        
+
         return article.html();
     }
 
     private void prepArticle(Element el) {
         //do stuff
         this.cleanStyles(el);
-        el.html(Pattern.compile("(<br\\s*\\/?>(\\s|&nbsp;?)*){1,}").
-                matcher(el.html()).replaceAll("<br />"));
+        el.html(BREAK_SPACES.matcher(el.html()).replaceAll("<br />"));
         this.cleanArticle(el);
     }
 
     private void cleanArticle(Element el) {
         Elements els = null;
-        Pattern video = Pattern.compile("http:\\/\\/(www\\.)?(youtube|vimeo)\\.com", Pattern.CASE_INSENSITIVE);
-
         els = el.select("form,object,iframe,embed");
         for (int i = 0; i < els.size(); i++) {
             Element node = els.get(i);
             if ((node.tagName().toLowerCase() == "object" ||
                  node.tagName().toLowerCase() == "embed") &&
-                video.matcher(node.html()).matches()) continue;
+                ALLOWED_VIDEO_URLS.matcher(node.html()).matches()) continue;
             node.remove();
         }
-        
+
         //clean headers
         for (int i = 1; i < 7; i++) {
             els = el.getElementsByTag("h"+ i);
@@ -138,7 +150,7 @@ class Readifier {
                 node.remove();
                 continue;
             }
-            
+
             if (node.text().split(",").length > 10) {
                 continue;
             }
@@ -150,7 +162,7 @@ class Readifier {
             Elements embeds = node.getElementsByTag("embed");
             int embedCount = 0;
             for (int k = 0; k < embeds.size(); k++) {
-                if (!video.matcher(embeds.get(k).attr("src")).matches()) {
+                if (!ALLOWED_VIDEO_URLS.matcher(embeds.get(k).attr("src")).matches()) {
                     embeds.get(k).remove();
                 } else {
                     embedCount++;
@@ -184,7 +196,7 @@ class Readifier {
         }
 
         //finally, replace <br/>s inbetween <p>s
-        el.html(Pattern.compile("<br[^>]*>\\s*<p", Pattern.CASE_INSENSITIVE).matcher(el.html()).replaceAll("<p"));
+        el.html(BREAKS_BEFORE_PARAGRAPHS.matcher(el.html()).replaceAll("<p"));
     }
 
     private void cleanStyles(Element el) {
@@ -208,39 +220,36 @@ class Readifier {
         Elements els = this.doc.getAllElements();
         for (int i = 0; i < els.size(); i++) {
             Element el = els.get(i);
-            Pattern re = null;
-            Pattern regex = null;
             String str = null;
             if (!preserveUnlikely) {
-                str = el.className() + el.id();
-                re = Pattern.compile("combx|comment|disqus|foot|header|menu|meta|nav|rss|shoutbox|sidebar|sponsor", Pattern.CASE_INSENSITIVE);
-                regex = Pattern.compile("and|article|body|column|main", Pattern.CASE_INSENSITIVE);
-                if (el.tagName().toLowerCase() != "body" && re.matcher(str).matches() &&
-                    !regex.matcher(str).matches()) {
+                str = (el.className() + el.id()).toLowerCase();
+                if (el.tagName().toLowerCase() != "body" && UNLIKELY_TAGS.matcher(str).matches() &&
+                    !LESS_LIKELY_TAGS.matcher(str).matches()) {
                     el.remove();
                     continue;
                 }
             }
 
             if (el.tagName().toLowerCase() == "div") {
-                re = Pattern.compile("(a|blockquote|dl|div|img|ol|p|pre|table|ul)", Pattern.CASE_INSENSITIVE);
-                if (re.matcher(el.html()).matches()) {
+                if (CONVERT_BLOCKS_TO_PS.matcher(el.html()).matches()) {
                     Element newEl = new Element(Tag.valueOf("p"), "");
                     newEl.html(el.html());
-                    //el.parent().replaceChild(el, newEl);
                     el.replaceWith(newEl);
-                    i--;
                 } else {
                     //might work... add in my new test thing for blockquotes, etc.
                     List<TextNode> childs = el.textNodes();
                     for (int j = 0; j < childs.size(); j++) {
                         TextNode child = childs.get(j);
-                        Element newEl = new Element(Tag.valueOf("p"), "");
-                        newEl.html(child.text());
-                        newEl.attr("style", "display:inline;");
-                        newEl.attr("class", READIFY_CLASS);
-                        //el.replaceChild(child, newEl);
-                        child.replaceWith(newEl);
+                        String txt = child.text().trim();
+                        if (txt == "") {
+                            child.remove();
+                        } else {
+                            Element newEl = new Element(Tag.valueOf("p"), "");
+                            newEl.html(child.text());
+                            newEl.attr("style", "display:inline;");
+                            newEl.attr("class", READIFY_CLASS);
+                            child.replaceWith(newEl);
+                        }
                     }
                 }
             }
@@ -289,7 +298,6 @@ class Readifier {
             Element el = candidates.get(i);
             int score = Integer.parseInt(el.attr(SCORE_STR));
             score = (int)Math.round(score * (1.0-this.linkDensity(el)));
-
             if (score > topScore) {
                 topEl = el;
                 topScore = score;
@@ -336,16 +344,16 @@ class Readifier {
                 content.appendChild(sib);
             }
         }
-        
+
         return content;
     }
 
     private float linkDensity(Element el) {
         int linkLength = 0;
         int textLength = el.text().length();
-        
+
         if (textLength == 0) return 0;
-        
+
         Elements els = el.getElementsByTag("a");
         for (int i = 0; i < els.size(); i++) {
             linkLength += els.get(i).text().length();
@@ -353,7 +361,7 @@ class Readifier {
         return (linkLength / textLength);
     }
 
-    private void scoreElement(Element el) {
+    private int scoreElement(Element el) {
         int score = 0;
         switch (el.tagName().toLowerCase()) {
         case "div":
@@ -384,30 +392,28 @@ class Readifier {
 
         score += this.getClassWeight(el);
         el.attr(SCORE_STR, ""+ score);
+        return score;
     }
 
     private int getClassWeight(Element el) {
         int weight = 0;
-        Pattern pos = Pattern.compile("article|body|content|entry|hentry|page|pagination|post|text", Pattern.CASE_INSENSITIVE);
-        Pattern neg = Pattern.compile("combx|comment|contact|foot|footer|footnote|link|media|meta|promo|related|scroll|shoutbox|sponsor|tags|widget", Pattern.CASE_INSENSITIVE);
-        String str = el.className();
-        if (str != "") {
-            //TODO: else if?
-            if (pos.matcher(str).matches()) {
+        String className = el.className().trim().toLowerCase();
+        String id = el.id().trim().toLowerCase();
+        if (className != "") {
+            if (CLASS_ID_POSITIVE.matcher(className).matches())
                 weight += SCORE_CLASS_POSITIVE;
-            }
-            if (neg.matcher(str).matches())
+            if (CLASS_ID_NEGATIVE.matcher(className).matches())
                 weight -= SCORE_CLASS_NEGATIVE;
         }
-        str = el.id();
-        if (str != "") {
+
+        if (id != "") {
             //TODO: else if?
-            if (pos.matcher(str).matches())
+            if (CLASS_ID_POSITIVE.matcher(id).matches())
                 weight += SCORE_ID_POSITIVE;
-            if (neg.matcher(str).matches())
+            if (CLASS_ID_NEGATIVE.matcher(id).matches())
                 weight -= SCORE_ID_NEGATIVE;
         }
-        
+        //logger.info(className + "|" + id + " " + weight);
         return weight;
     }
 
@@ -467,13 +473,11 @@ class Readifier {
         for (int i = (pathSplit.length-1); i > 0; i--) {
             String seg = pathSplit[i];
             String possibleType = "";
-            Pattern reg = null;
             int index = seg.indexOf(".");
             boolean del = false;
             if (index != -1) {
                 possibleType = seg.substring(index);
-                reg = Pattern.compile("[^a-zA-Z]", Pattern.CASE_INSENSITIVE);
-                if (!reg.matcher(possibleType).matches()) {
+                if (!NOT_ALPHANUM.matcher(possibleType).matches()) {
                     seg = seg.substring(0, index);
                 }
             }
@@ -482,13 +486,12 @@ class Readifier {
             if (index != -1) {
                 seg = seg.replaceAll(",00", "");
             }
-            
-            reg = Pattern.compile("((_|-)?p[a-z]*|(_|-))[0-9]{1,2}$", Pattern.CASE_INSENSITIVE);
-            if (i > lastTwo && reg.matcher(seg).matches()) {
-                seg = reg.matcher(seg).replaceFirst("");
+
+            if (i > lastTwo && PAGE_NUMS.matcher(seg).matches()) {
+                seg = PAGE_NUMS.matcher(seg).replaceFirst("");
             }
 
-            reg = Pattern.compile("^\\d{1,2}$");
+            Pattern reg = Pattern.compile("^\\d{1,2}$");
             if (i < 2 && reg.matcher(seg).matches()) {
                 del = true;
             } else if (i == (pathSplit.length-1) && seg.toLowerCase() == "index") {
